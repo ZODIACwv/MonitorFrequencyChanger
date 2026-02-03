@@ -56,7 +56,7 @@ class Program
     {
         public LUID adapterId;
         public uint id;
-        public uint modeInfoIdx;  // union with cloneGroupId
+        public uint modeInfoIdx;
         public uint statusFlags;
     }
 
@@ -65,7 +65,7 @@ class Program
     {
         public LUID adapterId;
         public uint id;
-        public uint modeInfoIdx;  // union with desktopModeInfoIdx
+        public uint modeInfoIdx;
         public uint outputTechnology;
         public uint rotation;
         public uint scaling;
@@ -98,7 +98,7 @@ class Program
         public DISPLAYCONFIG_RATIONAL vSyncFreq;
         public DISPLAYCONFIG_2DREGION activeSize;
         public DISPLAYCONFIG_2DREGION totalSize;
-        public uint videoStandard;  // union
+        public uint videoStandard;
         public uint scanLineOrdering;
     }
 
@@ -138,7 +138,6 @@ class Program
         public int left, top, right, bottom;
     }
 
-    // MODE_INFO union - use explicit layout
     [StructLayout(LayoutKind.Explicit)]
     struct DISPLAYCONFIG_MODE_INFO_UNION
     {
@@ -195,51 +194,47 @@ class Program
 
     static int Main(string[] args)
     {
-        var cmd = args.Length > 0 ? args[0].ToLower() : "list";
+        if (args.Length == 0)
+            return ListMonitors();
+
+        var cmd = args[0].ToLower();
 
         return cmd switch
         {
             "list" => ListMonitors(),
-            "set" => SetMonitorRefreshRate(),
-            "debug" => DebugStructSizes(),
+            "set" => SetRefreshRate(args),
             _ => ShowHelp()
         };
     }
 
-    static int DebugStructSizes()
-    {
-        Console.WriteLine($"DISPLAYCONFIG_PATH_INFO: {Marshal.SizeOf<DISPLAYCONFIG_PATH_INFO>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_MODE_INFO: {Marshal.SizeOf<DISPLAYCONFIG_MODE_INFO>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_TARGET_DEVICE_NAME: {Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_SOURCE_DEVICE_NAME: {Marshal.SizeOf<DISPLAYCONFIG_SOURCE_DEVICE_NAME>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_VIDEO_SIGNAL_INFO: {Marshal.SizeOf<DISPLAYCONFIG_VIDEO_SIGNAL_INFO>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_TARGET_MODE: {Marshal.SizeOf<DISPLAYCONFIG_TARGET_MODE>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_SOURCE_MODE: {Marshal.SizeOf<DISPLAYCONFIG_SOURCE_MODE>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_DESKTOP_IMAGE_INFO: {Marshal.SizeOf<DISPLAYCONFIG_DESKTOP_IMAGE_INFO>()} bytes");
-        Console.WriteLine($"DISPLAYCONFIG_MODE_INFO_UNION: {Marshal.SizeOf<DISPLAYCONFIG_MODE_INFO_UNION>()} bytes");
-        return 0;
-    }
-
     static int ShowHelp()
     {
-        Console.WriteLine("MonitorFrequencyChanger - установка частоты 59.89Hz для ASUS VW193D");
+        Console.WriteLine("MonitorFrequencyChanger - set exact monitor refresh rate via Numerator/Denominator");
         Console.WriteLine();
-        Console.WriteLine("Команды:");
-        Console.WriteLine("  list  - показать мониторы и их частоты (по умолчанию)");
-        Console.WriteLine("  set   - установить 1440x900 @ 59.89Hz на ASUS VW193D");
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  MonitorFrequencyChanger                         - list all monitors");
+        Console.WriteLine("  MonitorFrequencyChanger list                    - list all monitors");
+        Console.WriteLine("  MonitorFrequencyChanger set <index> <hz>        - set refresh rate by index");
+        Console.WriteLine("  MonitorFrequencyChanger set <name> <hz>         - set refresh rate by name");
+        Console.WriteLine();
+        Console.WriteLine("Examples:");
+        Console.WriteLine("  MonitorFrequencyChanger set 0 59.89             - set monitor 0 to 59.89 Hz");
+        Console.WriteLine("  MonitorFrequencyChanger set \"ASUS VW193D\" 59.89 - set by name");
+        Console.WriteLine("  MonitorFrequencyChanger set 1 144              - set monitor 1 to 144 Hz");
+        Console.WriteLine();
+        Console.WriteLine("Note: Uses Windows CCD API with DISPLAYCONFIG_RATIONAL for precise fractional rates.");
+        Console.WriteLine("      This bypasses Windows rounding that occurs with standard display settings.");
         return 0;
     }
 
-    static int ListMonitors()
+    static (DISPLAYCONFIG_PATH_INFO[] paths, DISPLAYCONFIG_MODE_INFO[] modes, uint pathCount, uint modeCount)? GetDisplayConfig()
     {
         int err = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount);
         if (err != 0)
         {
-            Console.WriteLine($"Ошибка GetDisplayConfigBufferSizes: {err}");
-            return 1;
+            Console.WriteLine($"Error GetDisplayConfigBufferSizes: {err}");
+            return null;
         }
-
-        Console.WriteLine($"pathCount={pathCount}, modeCount={modeCount}");
 
         var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
         var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
@@ -247,183 +242,193 @@ class Program
         err = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
         if (err != 0)
         {
-            Console.WriteLine($"Ошибка QueryDisplayConfig: {err}");
-            return 1;
+            Console.WriteLine($"Error QueryDisplayConfig: {err}");
+            return null;
         }
 
-        Console.WriteLine($"После query: pathCount={pathCount}, modeCount={modeCount}");
-        Console.WriteLine();
-        Console.WriteLine("Активные мониторы:");
+        return (paths, modes, pathCount, modeCount);
+    }
+
+    static string GetMonitorName(ref DISPLAYCONFIG_PATH_INFO path)
+    {
+        var targetName = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
+        targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        targetName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
+        targetName.header.adapterId = path.targetInfo.adapterId;
+        targetName.header.id = path.targetInfo.id;
+        DisplayConfigGetDeviceInfo(ref targetName);
+        return targetName.monitorFriendlyDeviceName ?? "";
+    }
+
+    static string GetSourceName(ref DISPLAYCONFIG_PATH_INFO path)
+    {
+        var sourceName = new DISPLAYCONFIG_SOURCE_DEVICE_NAME();
+        sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sourceName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SOURCE_DEVICE_NAME>();
+        sourceName.header.adapterId = path.sourceInfo.adapterId;
+        sourceName.header.id = path.sourceInfo.id;
+        DisplayConfigGetDeviceInfo(ref sourceName);
+        return sourceName.viewGdiDeviceName ?? "";
+    }
+
+    static int ListMonitors()
+    {
+        var config = GetDisplayConfig();
+        if (config == null) return 1;
+
+        var (paths, modes, pathCount, modeCount) = config.Value;
+
+        Console.WriteLine("Active monitors:");
         Console.WriteLine();
 
         for (int i = 0; i < pathCount; i++)
         {
             ref var path = ref paths[i];
 
-            Console.WriteLine($"[{i}] path.sourceInfo.adapterId = {path.sourceInfo.adapterId.LowPart}:{path.sourceInfo.adapterId.HighPart}");
-            Console.WriteLine($"    path.sourceInfo.id = {path.sourceInfo.id}");
-            Console.WriteLine($"    path.sourceInfo.modeInfoIdx = {path.sourceInfo.modeInfoIdx}");
-            Console.WriteLine($"    path.targetInfo.adapterId = {path.targetInfo.adapterId.LowPart}:{path.targetInfo.adapterId.HighPart}");
-            Console.WriteLine($"    path.targetInfo.id = {path.targetInfo.id}");
-            Console.WriteLine($"    path.targetInfo.modeInfoIdx = {path.targetInfo.modeInfoIdx}");
-            Console.WriteLine($"    path.targetInfo.refreshRate = {path.targetInfo.refreshRate.Numerator}/{path.targetInfo.refreshRate.Denominator} = {path.targetInfo.refreshRate.ToDouble():F2} Hz");
+            var monitorName = GetMonitorName(ref path);
+            var sourceName = GetSourceName(ref path);
 
-            // Получаем имя монитора
-            var targetName = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
-            targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-            targetName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
-            targetName.header.adapterId = path.targetInfo.adapterId;
-            targetName.header.id = path.targetInfo.id;
-            int r = DisplayConfigGetDeviceInfo(ref targetName);
-            Console.WriteLine($"    DisplayConfigGetDeviceInfo(target) = {r}");
-            Console.WriteLine($"    Монитор: '{targetName.monitorFriendlyDeviceName}'");
-
-            // Получаем имя источника
-            var sourceName = new DISPLAYCONFIG_SOURCE_DEVICE_NAME();
-            sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-            sourceName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SOURCE_DEVICE_NAME>();
-            sourceName.header.adapterId = path.sourceInfo.adapterId;
-            sourceName.header.id = path.sourceInfo.id;
-            r = DisplayConfigGetDeviceInfo(ref sourceName);
-            Console.WriteLine($"    DisplayConfigGetDeviceInfo(source) = {r}");
-            Console.WriteLine($"    GDI Name: '{sourceName.viewGdiDeviceName}'");
-
-            // Получаем режим для разрешения
             uint width = 0, height = 0;
             double vSync = 0;
 
-            var sourceModeIdx = path.sourceInfo.modeInfoIdx & 0xFFFF; // lower 16 bits
-            if (sourceModeIdx < modeCount)
+            var sourceModeIdx = path.sourceInfo.modeInfoIdx & 0xFFFF;
+            if (sourceModeIdx < modeCount && modes[sourceModeIdx].infoType == 1)
             {
-                ref var modeInfo = ref modes[sourceModeIdx];
-                Console.WriteLine($"    sourceMode[{sourceModeIdx}].infoType = {modeInfo.infoType}");
-                if (modeInfo.infoType == 1) // SOURCE
-                {
-                    width = modeInfo.info.sourceMode.width;
-                    height = modeInfo.info.sourceMode.height;
-                }
+                width = modes[sourceModeIdx].info.sourceMode.width;
+                height = modes[sourceModeIdx].info.sourceMode.height;
             }
 
             var targetModeIdx = path.targetInfo.modeInfoIdx & 0xFFFF;
-            if (targetModeIdx < modeCount)
+            if (targetModeIdx < modeCount && modes[targetModeIdx].infoType == 2)
             {
-                ref var modeInfo = ref modes[targetModeIdx];
-                Console.WriteLine($"    targetMode[{targetModeIdx}].infoType = {modeInfo.infoType}");
-                if (modeInfo.infoType == 2) // TARGET
+                vSync = modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.vSyncFreq.ToDouble();
+                if (width == 0)
                 {
-                    vSync = modeInfo.info.targetMode.targetVideoSignalInfo.vSyncFreq.ToDouble();
-                    if (width == 0)
-                    {
-                        width = modeInfo.info.targetMode.targetVideoSignalInfo.activeSize.cx;
-                        height = modeInfo.info.targetMode.targetVideoSignalInfo.activeSize.cy;
-                    }
+                    width = modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.activeSize.cx;
+                    height = modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.activeSize.cy;
                 }
             }
 
-            Console.WriteLine($"    Разрешение: {width}x{height}");
-            Console.WriteLine($"    vSync: {vSync:F2} Hz");
+            var refreshRate = path.targetInfo.refreshRate;
+
+            Console.WriteLine($"[{i}] {sourceName}");
+            Console.WriteLine($"    Name: {(string.IsNullOrEmpty(monitorName) ? "(unknown)" : monitorName)}");
+            Console.WriteLine($"    Resolution: {width}x{height}");
+            Console.WriteLine($"    Refresh: {refreshRate.ToDouble():F2} Hz ({refreshRate.Numerator}/{refreshRate.Denominator})");
             Console.WriteLine();
         }
 
         return 0;
     }
 
-    static int SetMonitorRefreshRate()
+    static int SetRefreshRate(string[] args)
     {
-        const string TARGET_MONITOR = "ASUS VW193D";
-        const uint TARGET_WIDTH = 1440;
-        const uint TARGET_HEIGHT = 900;
-        const uint TARGET_REFRESH_NUM = 5989;
-        const uint TARGET_REFRESH_DEN = 100;
-
-        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, out uint pathCount, out uint modeCount) != 0)
+        if (args.Length < 3)
         {
-            Console.WriteLine("Ошибка: не удалось получить размеры буферов");
+            Console.WriteLine("Usage: MonitorFrequencyChanger set <index|name> <hz>");
+            Console.WriteLine("Example: MonitorFrequencyChanger set 0 59.89");
             return 1;
         }
 
-        var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
-        var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
-
-        if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero) != 0)
+        var target = args[1];
+        if (!double.TryParse(args[2], System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double hz))
         {
-            Console.WriteLine("Ошибка: не удалось получить конфигурацию дисплеев");
+            // Try with current culture
+            if (!double.TryParse(args[2], out hz))
+            {
+                Console.WriteLine($"Invalid refresh rate: {args[2]}");
+                return 1;
+            }
+        }
+
+        if (hz <= 0 || hz > 500)
+        {
+            Console.WriteLine($"Invalid refresh rate: {hz} Hz (must be 0-500)");
             return 1;
         }
 
+        var config = GetDisplayConfig();
+        if (config == null) return 1;
+
+        var (paths, modes, pathCount, modeCount) = config.Value;
+
+        // Find target monitor
         int targetIndex = -1;
 
-        for (int i = 0; i < pathCount; i++)
+        // Try parse as index first
+        if (int.TryParse(target, out int idx) && idx >= 0 && idx < pathCount)
         {
-            ref var path = ref paths[i];
-
-            var targetName = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
-            targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-            targetName.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
-            targetName.header.adapterId = path.targetInfo.adapterId;
-            targetName.header.id = path.targetInfo.id;
-            DisplayConfigGetDeviceInfo(ref targetName);
-
-            Console.WriteLine($"[{i}] {targetName.monitorFriendlyDeviceName}");
-
-            if (!string.IsNullOrEmpty(targetName.monitorFriendlyDeviceName) &&
-                targetName.monitorFriendlyDeviceName.Contains(TARGET_MONITOR, StringComparison.OrdinalIgnoreCase))
+            targetIndex = idx;
+        }
+        else
+        {
+            // Search by name
+            for (int i = 0; i < pathCount; i++)
             {
-                targetIndex = i;
-                Console.WriteLine($"    ^ НАЙДЕН целевой монитор!");
-                break;
+                var name = GetMonitorName(ref paths[i]);
+                if (!string.IsNullOrEmpty(name) && name.Contains(target, StringComparison.OrdinalIgnoreCase))
+                {
+                    targetIndex = i;
+                    break;
+                }
             }
         }
 
         if (targetIndex == -1)
         {
-            Console.WriteLine($"Монитор '{TARGET_MONITOR}' не найден по имени.");
-            Console.WriteLine("Использую монитор с индексом 1 (второй монитор)...");
-
-            if (pathCount > 1)
-                targetIndex = 1;
-            else
-            {
-                Console.WriteLine("Ошибка: второй монитор не обнаружен");
-                return 1;
-            }
+            Console.WriteLine($"Monitor not found: {target}");
+            Console.WriteLine("Use 'MonitorFrequencyChanger list' to see available monitors.");
+            return 1;
         }
 
-        Console.WriteLine($"Целевой монитор: индекс {targetIndex}");
+        // Calculate numerator/denominator for the desired refresh rate
+        // Use precision of 2 decimal places (multiply by 100)
+        uint numerator = (uint)Math.Round(hz * 100);
+        uint denominator = 100;
 
-        // Устанавливаем частоту в path
-        paths[targetIndex].targetInfo.refreshRate.Numerator = TARGET_REFRESH_NUM;
-        paths[targetIndex].targetInfo.refreshRate.Denominator = TARGET_REFRESH_DEN;
+        // Simplify fraction if possible
+        uint gcd = GCD(numerator, denominator);
+        numerator /= gcd;
+        denominator /= gcd;
 
-        // Обновляем разрешение и частоту в mode info
-        var sourceModeIdx = paths[targetIndex].sourceInfo.modeInfoIdx & 0xFFFF;
-        if (sourceModeIdx < modeCount && modes[sourceModeIdx].infoType == 1)
-        {
-            modes[sourceModeIdx].info.sourceMode.width = TARGET_WIDTH;
-            modes[sourceModeIdx].info.sourceMode.height = TARGET_HEIGHT;
-        }
+        var monitorName = GetMonitorName(ref paths[targetIndex]);
+        Console.WriteLine($"Target: [{targetIndex}] {(string.IsNullOrEmpty(monitorName) ? "(unknown)" : monitorName)}");
+        Console.WriteLine($"Setting refresh rate: {hz:F2} Hz ({numerator}/{denominator})");
 
+        // Set refresh rate in path
+        paths[targetIndex].targetInfo.refreshRate.Numerator = numerator;
+        paths[targetIndex].targetInfo.refreshRate.Denominator = denominator;
+
+        // Update vSyncFreq in mode info
         var targetModeIdx = paths[targetIndex].targetInfo.modeInfoIdx & 0xFFFF;
         if (targetModeIdx < modeCount && modes[targetModeIdx].infoType == 2)
         {
-            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.vSyncFreq.Numerator = TARGET_REFRESH_NUM;
-            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.vSyncFreq.Denominator = TARGET_REFRESH_DEN;
-            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.activeSize.cx = TARGET_WIDTH;
-            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.activeSize.cy = TARGET_HEIGHT;
+            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.vSyncFreq.Numerator = numerator;
+            modes[targetModeIdx].info.targetMode.targetVideoSignalInfo.vSyncFreq.Denominator = denominator;
         }
-
-        Console.WriteLine($"Устанавливаю {TARGET_WIDTH}x{TARGET_HEIGHT} @ {(double)TARGET_REFRESH_NUM / TARGET_REFRESH_DEN:F2} Hz...");
 
         int result = SetDisplayConfig(pathCount, paths, modeCount, modes,
             SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
 
         if (result != 0)
         {
-            Console.WriteLine($"Ошибка SetDisplayConfig: {result} (0x{result:X8})");
+            Console.WriteLine($"Error SetDisplayConfig: {result} (0x{result:X8})");
             return 1;
         }
 
-        Console.WriteLine("Успешно!");
+        Console.WriteLine("Success!");
         return 0;
+    }
+
+    static uint GCD(uint a, uint b)
+    {
+        while (b != 0)
+        {
+            uint t = b;
+            b = a % b;
+            a = t;
+        }
+        return a;
     }
 }
